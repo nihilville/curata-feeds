@@ -1,0 +1,103 @@
+<?php 
+
+/**
+ * @file 
+ * This takes json data from the following url: http://foobar/api/v1/articles
+ * detects if there is new content there, and then turns every instance of new content into an article snippet
+ */
+ 
+
+/**********************************************************************************************************************************************************
+ * Check if title of function exists (this allows us to only create new nodes if they don't exist already)
+ */
+function curata_articles_node_title_exists($title) {
+  return db_query("SELECT nid FROM {node} WHERE title = :title", array(':title' => $title))->fetchField();
+}
+
+/**********************************************************************************************************************************************************
+ * Implements hook_help().
+ */
+function curata_articles_help($path, $arg) {
+  $output = "";
+  switch ($path) {
+    case "admin/help#curata_articles":
+      $output = "Curata articles is a custom module for creating articles content out of a curata feed";
+      break;
+  }
+  $values = array("@output" => $output);
+  return t("@output", $values);
+}
+
+/**********************************************************************************************************************************************************
+ * Implements hook_cron(). To check for and publish new article nodes everytime the cron runs 
+ */
+function curata_articles_cron(){
+	$curata_json = json_decode(file_get_contents("http://foobar/api/v1/articles.json"), JSON_PRETTY_PRINT);
+	foreach($curata_json['articles'] as $key=>$val){ 
+		$article_title = $val['title']; // title of article
+		$article_path = "articles/" . strtolower(preg_replace('/[^A-Za-z0-9\-]/', '', str_replace(" ", "-", $val['title']))); // alias of article
+		$article_body = $val['snippet']; // body of article
+		$article_image_name = substr(strrchr($val['image'],"media/"), 6); // image of article will be renamed to this
+		$article_tags = array();
+		foreach($val['categories'] as $tag){
+			array_push($article_tags, $tag['name']);
+		}
+		// To create content, we're going to first test if the node title from curata already exists in the db, and then if any other node already has the same alias in the db
+		// if both those conditions are true, we can 
+		if(!curata_articles_node_title_exists($article_title) && !drupal_lookup_path("source", $article_path)){
+			$node = new stdClass(); // We create a new node object
+			$node->type = "article"; // Or any other content type you want
+			$node->title = $article_title;
+			// Create meta description
+			$node->metatags[description]['value'] = substr(strip_tags($article_body), 0, 155);;
+			$node->status = 1;
+			$node->language = LANGUAGE_NONE;
+			$node->path = array('alias' => $article_path); // Setting a node path
+			node_object_prepare($node); // Set some default values.
+			$node->uid = 1; // Or any id you wish (1 is the uid for admin)
+		
+			// Let's add standard body field
+			$node->body[$node->language][0]['value'] = $article_body . "<a href='" . $val['share_url'] . "' target='_blank' class='curata-share btn-primary'>Read Full Article</a></p>";
+			//$node->body[$node->language][0]['summary'] = 'Here goes a summary';
+			$node->body[$node->language][0]['format'] = 'filtered_html'; // If field has a format, you need to define it. Here we define a default filtered_html format for a body field
+			// Let's attach the taxonomy tags now
+			foreach($article_tags as $tag_name){
+				$tag = taxonomy_get_term_by_name($tag_name);
+				// if taxonomy term doesn't exist, let's create it
+				if(empty($tag)){
+					taxonomy_term_save((object) array(
+						'name' => $tag_name,
+						'vid' => '1',
+					));
+					$tag = taxonomy_get_term_by_name($tag_name);
+				}
+				// then insert each taxonomy term into the newly created node
+				foreach ($tag as $tag_id) {
+					if ($tag_id->vid == 1) {
+						$node->field_tags[$node->language][]['tid'] = $tag_id->tid;
+					}
+				}
+			}
+			// Next, let's set the "preview image" for the new article, if it exists
+			if($val['image']){
+				// Create image object - the new way
+				$file = system_retrieve_file($val['image'], "public://" , TRUE); // get image file from curata
+				// public puts the file at the base of the sites/default/files directory, but it has a numeric name until renamed by the file_move function
+				$file = file_copy($file, 'public://', FILE_EXISTS_RENAME);
+				$file = file_move($file, "public://" . $article_image_name, FILE_EXISTS_REPLACE);
+				// set permissions to new image file (necessary to create thumbnail)
+				drupal_chmod("public://" . $article_image_name, $mode = 0777);
+				$node->field_preview_image[$node->language][0] = (array) $file;
+				$node->field_preview_image['und'][0]['alt'] = $node->title;
+				// create thumbnail
+				$style = 'thumbnail';
+				$fileurl = "public://" . $article_image_name;
+				$destination = "public://styles/thumbnail/public/" . $article_image_name;
+				image_style_create_derivative(image_style_load($style), $fileurl, $destination);
+			}
+			// Everything's been added, let's make the node!
+			$node = node_submit($node); // Prepare node for a submit
+			node_save($node); // After this call we'll get a nid
+		}
+	}
+}

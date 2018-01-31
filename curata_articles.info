@@ -1,0 +1,6 @@
+name = Curata Articles
+description = Create article nodes from new Curata content
+package = Custom
+core = 7.x
+configure = admin/settings/curata_articles
+files[] = curata_articles.module
